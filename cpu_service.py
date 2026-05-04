@@ -337,6 +337,7 @@ class BackgroundMonitor:
         ws = wb.active
         ws.title = "cpu_usage"
         wb.save(path)
+        self._header_written = False
 
     @staticmethod
     def _sort_cpu_keys(keys: List[str]) -> List[str]:
@@ -357,9 +358,10 @@ class BackgroundMonitor:
         with self._write_lock:
             wb = load_workbook(self.xlsx_path)
             ws = wb["cpu_usage"]
-            # Write header on first data row
-            if ws.max_row == 1 and ws["A1"].value is None:
+            # Write header exactly once, before first data row
+            if not self._header_written:
                 ws.append(["timestamp"] + self._col_order)
+                self._header_written = True
             ws.append(row)
             wb.save(self.xlsx_path)
 
