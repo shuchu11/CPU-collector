@@ -4,14 +4,23 @@ Extracted from sideloader service. Run directly:
     python cpu_service.py
 """
 
+import io
 import re
 import time
 import subprocess
 import threading
 from abc import ABC, abstractmethod
 from typing import Dict, List, Any, Optional
+from datetime import datetime
 
-from flask import Flask, jsonify, request
+import matplotlib
+matplotlib.use("Agg")  # non-interactive backend, safe inside Docker
+import matplotlib.pyplot as plt
+import matplotlib.patches as mpatches
+import seaborn as sns
+import pandas as pd
+
+from flask import Flask, jsonify, request, send_file
 
 app = Flask(__name__)
 PORT = 5001  # Change as needed
@@ -347,6 +356,196 @@ def context_switches_monitor():
 def irq_affinity():
     """Get IRQ affinity for network interfaces"""
     return jsonify(IRQAffinityCollector.get_affinity(request.args.get("pattern", "ens")))
+
+
+# ============================================================================
+# PLOT HELPERS
+# ============================================================================
+
+def _sort_cpu_keys(keys: List[str]) -> List[str]:
+    """Sort cpu0, cpu1 ... cpu47 numerically, 'cpu' (aggregate) last"""
+    def _key(k):
+        m = re.match(r"^cpu(\d+)$", k)
+        return (0, int(m.group(1))) if m else (1, k)
+    return sorted(keys, key=_key)
+
+
+def _build_heatmap_png(cpu_data: Dict[str, Any], title: str) -> io.BytesIO:
+    """
+    Per-core CPU usage heatmap (min / avg / max).
+    Expects cpu_data = { "cpu0": {"usage": {"min":…, "avg":…, "max":…}}, … }
+    """
+    sorted_keys = _sort_cpu_keys([k for k in cpu_data if k != "cpu"])
+
+    rows, labels = [], []
+    for cpu_name in sorted_keys:
+        u = cpu_data[cpu_name]["usage"]
+        rows.append([u.get("min", 0), u.get("avg", 0), u.get("max", 0)])
+        labels.append(cpu_name)
+
+    df = pd.DataFrame(rows, index=labels, columns=["min %", "avg %", "max %"])
+
+    fig_h = max(6, len(labels) * 0.35)
+    fig, ax = plt.subplots(figsize=(8, fig_h))
+    sns.heatmap(df, annot=True, fmt=".1f", cmap="YlOrRd",
+                cbar_kws={"label": "CPU %"}, ax=ax)
+    ax.set_title(title)
+    ax.set_xlabel("Metric")
+    ax.set_ylabel("CPU Core")
+    plt.tight_layout()
+
+    buf = io.BytesIO()
+    plt.savefig(buf, format="png", dpi=150)
+    plt.close(fig)
+    buf.seek(0)
+    return buf
+
+
+def _build_timeseries_png(cpu_data: Dict[str, Any], title: str) -> io.BytesIO:
+    """
+    Per-core CPU usage timeseries line chart.
+    Expects timeseries key inside each cpu's usage dict.
+    """
+    sorted_keys = _sort_cpu_keys([k for k in cpu_data if k != "cpu"])
+
+    # Collect series that actually have timeseries data
+    series = {}
+    timestamps = None
+    for cpu_name in sorted_keys:
+        ts_data = cpu_data[cpu_name]["usage"].get("timeseries")
+        if ts_data:
+            if timestamps is None:
+                raw_ts = ts_data["timestamps"]
+                # Normalise to seconds-since-start
+                t0 = raw_ts[0]
+                timestamps = [round(t - t0, 2) for t in raw_ts]
+            series[cpu_name] = ts_data["percent"]
+
+    if not series or timestamps is None:
+        raise ValueError("No timeseries data found in JSON")
+
+    fig, ax = plt.subplots(figsize=(14, 6))
+    cmap = plt.get_cmap("tab20")
+    for i, (cpu_name, values) in enumerate(series.items()):
+        ax.plot(timestamps, values, label=cpu_name,
+                color=cmap(i % 20), linewidth=1)
+
+    ax.set_title(title)
+    ax.set_xlabel("Time (s)")
+    ax.set_ylabel("CPU Usage (%)")
+    ax.set_ylim(0, 100)
+    ax.legend(loc="upper right", fontsize=7, ncol=4)
+    ax.grid(True, alpha=0.3)
+    plt.tight_layout()
+
+    buf = io.BytesIO()
+    plt.savefig(buf, format="png", dpi=150)
+    plt.close(fig)
+    buf.seek(0)
+    return buf
+
+
+def _build_combined_png(cpu_data: Dict[str, Any], label: str) -> io.BytesIO:
+    """Combine heatmap + timeseries side-by-side into one PNG"""
+    sorted_keys = _sort_cpu_keys([k for k in cpu_data if k != "cpu"])
+
+    # --- heatmap data ---
+    rows, hlabels = [], []
+    for cpu_name in sorted_keys:
+        u = cpu_data[cpu_name]["usage"]
+        rows.append([u.get("min", 0), u.get("avg", 0), u.get("max", 0)])
+        hlabels.append(cpu_name)
+    df = pd.DataFrame(rows, index=hlabels, columns=["min %", "avg %", "max %"])
+
+    # --- timeseries data ---
+    series, timestamps = {}, None
+    for cpu_name in sorted_keys:
+        ts_data = cpu_data[cpu_name]["usage"].get("timeseries")
+        if ts_data:
+            if timestamps is None:
+                t0 = ts_data["timestamps"][0]
+                timestamps = [round(t - t0, 2) for t in ts_data["timestamps"]]
+            series[cpu_name] = ts_data["percent"]
+
+    has_ts = bool(series and timestamps)
+    fig_h = max(8, len(sorted_keys) * 0.35)
+    fig, axes = plt.subplots(1, 2 if has_ts else 1,
+                             figsize=(20 if has_ts else 9, fig_h))
+    if not has_ts:
+        axes = [axes]
+
+    # heatmap
+    sns.heatmap(df, annot=True, fmt=".1f", cmap="YlOrRd",
+                cbar_kws={"label": "CPU %"}, ax=axes[0])
+    axes[0].set_title(f"CPU Usage Heatmap — {label}")
+    axes[0].set_xlabel("Metric")
+    axes[0].set_ylabel("CPU Core")
+
+    # timeseries
+    if has_ts:
+        cmap = plt.get_cmap("tab20")
+        for i, (cpu_name, values) in enumerate(series.items()):
+            axes[1].plot(timestamps, values, label=cpu_name,
+                         color=cmap(i % 20), linewidth=1)
+        axes[1].set_title(f"CPU Usage Timeseries — {label}")
+        axes[1].set_xlabel("Time (s)")
+        axes[1].set_ylabel("CPU Usage (%)")
+        axes[1].set_ylim(0, 100)
+        axes[1].legend(loc="upper right", fontsize=7, ncol=4)
+        axes[1].grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    buf = io.BytesIO()
+    plt.savefig(buf, format="png", dpi=150)
+    plt.close(fig)
+    buf.seek(0)
+    return buf
+
+
+# ============================================================================
+# PLOT ROUTE
+# ============================================================================
+
+@app.route("/cpu/plot", methods=["POST"])
+def cpu_plot():
+    """
+    Generate CPU usage plots from existing JSON data.
+
+    POST body (JSON):
+    {
+        "data":  { ...output from /cpu/monitor... },   # required
+        "type":  "heatmap" | "timeseries" | "both",   # default: "both"
+        "label": "optional title suffix"               # default: current timestamp
+    }
+
+    Returns: image/png
+    """
+    body = request.json or {}
+
+    cpu_json = body.get("data")
+    if not cpu_json:
+        return jsonify({"error": "missing 'data' field"}), 400
+
+    cpu_data = cpu_json.get("cpus")
+    if not cpu_data:
+        return jsonify({"error": "'data' must contain a 'cpus' key (output of /cpu/monitor)"}), 400
+
+    plot_type = body.get("type", "both")
+    label = body.get("label") or datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    try:
+        if plot_type == "heatmap":
+            buf = _build_heatmap_png(cpu_data, f"CPU Usage Heatmap — {label}")
+        elif plot_type == "timeseries":
+            buf = _build_timeseries_png(cpu_data, f"CPU Usage Timeseries — {label}")
+        else:  # "both"
+            buf = _build_combined_png(cpu_data, label)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 422
+    except Exception as e:
+        return jsonify({"error": f"plot generation failed: {e}"}), 500
+
+    return send_file(buf, mimetype="image/png")
 
 
 # ============================================================================
