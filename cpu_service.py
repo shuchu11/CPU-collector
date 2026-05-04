@@ -528,16 +528,18 @@ def cpu_monitor():
 def cpu_monitor_start():
     """
     Start continuous background monitoring, writing every second to Excel.
+    If no xlsx path given, auto-generates one with timestamp: /app/cpu_log_YYYYMMDD_HHMMSS.xlsx
 
     POST body:
     {
-        "xlsx": "/data/cpu_log.xlsx"    # path inside container
+        "xlsx": "/app/cpu_log.xlsx"    # optional, auto-named if omitted
     }
     """
     body = request.json or {}
     xlsx_path = body.get("xlsx")
     if not xlsx_path:
-        return jsonify({"error": "missing 'xlsx' field"}), 400
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        xlsx_path = f"/app/cpu_log_{ts}.xlsx"
     return jsonify(_monitor.start(xlsx_path))
 
 
@@ -559,19 +561,21 @@ def cpu_monitor_status():
 def cpu_plot():
     """
     Generate CPU usage plots from Excel data.
-    Always saves a copy to /app/ and also returns the image as HTTP response.
+    Saves heatmap and timeseries as separate files with timestamp in filename.
 
     POST body:
     {
-        "xlsx":  "/app/cpu_log.xlsx",            # required
-        "type":  "heatmap|timeseries|both",      # default: "both"
-        "label": "my run",                       # optional title suffix
-        "start": "2026-05-04 10:00:00",          # optional time filter
-        "end":   "2026-05-04 12:00:00"           # optional time filter
+        "xlsx":  "/app/cpu_log_20260504_100000.xlsx",  # required
+        "label": "my run",                             # optional title suffix
+        "start": "2026-05-04 10:00:00",                # optional time filter
+        "end":   "2026-05-04 12:00:00"                 # optional time filter
     }
 
-    Returns: image/png
-    Response header X-Saved-Path contains the server-side saved file path.
+    Returns: JSON with saved file paths
+    {
+        "heatmap":    "/app/cpu_plot_heatmap_20260504_102300.png",
+        "timeseries": "/app/cpu_plot_timeseries_20260504_102300.png"
+    }
     """
     body = request.json or {}
     xlsx_path = body.get("xlsx")
@@ -580,38 +584,32 @@ def cpu_plot():
     if not os.path.exists(xlsx_path):
         return jsonify({"error": f"file not found: {xlsx_path}"}), 404
 
-    plot_type = body.get("type", "both")
     label = body.get("label") or datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     start = body.get("start")
     end = body.get("end")
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
 
     try:
         df = _load_excel(xlsx_path, start, end)
-        if plot_type == "heatmap":
-            buf = _build_heatmap_from_excel(df, label)
-        elif plot_type == "timeseries":
-            buf = _build_timeseries_from_excel(df, label)
-        else:
-            buf = _build_combined_from_excel(df, label)
+        heatmap_buf    = _build_heatmap_from_excel(df, label)
+        timeseries_buf = _build_timeseries_from_excel(df, label)
     except ValueError as e:
         return jsonify({"error": str(e)}), 422
     except Exception as e:
         return jsonify({"error": f"plot failed: {e}"}), 500
 
-    # Save a copy to /app/ (project directory via volume mount)
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    filename = f"cpu_plot_{plot_type}_{ts}.png"
-    save_path = os.path.join("/app", filename)
-    try:
-        with open(save_path, "wb") as f:
-            f.write(buf.getvalue())
-    except Exception as e:
-        print(f"[cpu_plot] failed to save server copy: {e}")
+    saved = {}
+    for name, buf in [("heatmap", heatmap_buf), ("timeseries", timeseries_buf)]:
+        path = os.path.join("/app", f"cpu_plot_{name}_{ts}.png")
+        try:
+            with open(path, "wb") as f:
+                f.write(buf.getvalue())
+            saved[name] = path
+        except Exception as e:
+            print(f"[cpu_plot] failed to save {name}: {e}")
+            saved[name] = f"error: {e}"
 
-    buf.seek(0)
-    response = send_file(buf, mimetype="image/png")
-    response.headers["X-Saved-Path"] = save_path
-    return response
+    return jsonify(saved)
 
 
 # --- other endpoints (unchanged) ------------------------------------------
