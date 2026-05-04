@@ -1,1 +1,4 @@
 flask
+matplotlib
+seaborn
+pandas
