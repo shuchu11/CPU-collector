@@ -9,8 +9,10 @@ CPU-collector/
 ```
 
 ## Build your image
+Git clone this repo first
 ```
-docker compose up -d --build
+cd CPU-collector/
+sudo docker compose up -d --build
 ```
 
 ## Steps
