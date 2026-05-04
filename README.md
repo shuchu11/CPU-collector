@@ -15,12 +15,6 @@ docker compose up -d --build
 
 ## Steps
 
-**規則：**
-- 每秒一行
-- 第一欄永遠是 timestamp（格式 YYYY-MM-DD HH:MM:SS）
-- 之後每欄是一個 CPU core，順序從 cpu0 到 cpu47（按數字排序）
-- 每格的值是該秒該 core 的使用率（%），例如 4.5 代表 4.5%
-
 ```
 # 開始監測
 curl -X POST http://localhost:5001/cpu/monitor/start \
@@ -29,7 +23,19 @@ curl -X POST http://localhost:5001/cpu/monitor/start \
 
 
 
-# Excel 檔案結構會長這樣( Excel 存在 host 的 CPU-collector/ 目錄 ) :
+
+
+
+
+##### Excel 檔案結構會長這樣( Excel 存在 host 的 CPU-collector/ 目錄 ) :
+
+#####################################################################
+**規則：**
+- 每秒一行
+- 第一欄永遠是 timestamp（格式 YYYY-MM-DD HH:MM:SS）
+- 之後每欄是一個 CPU core，順序從 cpu0 到 cpu47（按數字排序）
+- 每格的值是該秒該 core 的使用率（%），例如 4.5 代表 4.5%
+#####################################################################
 
 | timestamp           | cpu0 | cpu1 | cpu2 | ... | cpu47 |
 | ------------------- | ---- | ---- | ---- | --- | ----- |
