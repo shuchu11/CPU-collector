@@ -282,31 +282,61 @@ class ThreadCPUCollector(BaseCollector):
         self.cached_pid = min(pid_list)
         return self.cached_pid
 
+    def _read_thread_stat(self, pid: int, tid: int):
+        """Read /proc/<pid>/task/<tid>/stat — returns (utime, stime, cutime, cstime, processor)"""
+        stat = nsenter(f"cat /proc/{pid}/task/{tid}/stat 2>/dev/null")
+        if not stat:
+            return None
+        # comm may contain spaces and is wrapped in parens; split after last ')'
+        rp = stat.rfind(")")
+        if rp == -1:
+            return None
+        fields = stat[rp + 2:].split()
+        # fields[0] = state, fields[11] = utime, fields[12] = stime,
+        # fields[13] = cutime, fields[14] = cstime, fields[36] = processor
+        try:
+            utime  = int(fields[11])
+            stime  = int(fields[12])
+            processor = int(fields[36])
+            return utime, stime, processor
+        except (IndexError, ValueError):
+            return None
+
+    def _read_thread_comm(self, pid: int, tid: int) -> str:
+        comm = nsenter(f"cat /proc/{pid}/task/{tid}/comm 2>/dev/null")
+        return comm.strip() if comm else str(tid)
+
     def collect_sample(self) -> Optional[Dict[str, Any]]:
         pid = self._discover_pid()
         if not pid:
             return None
-        result = nsenter(f"pidstat -t -p {pid} 1 1")
-        if not result:
+
+        # List all TIDs
+        task_list = nsenter(f"ls /proc/{pid}/task 2>/dev/null")
+        if not task_list:
             return None
+        tids = [int(t) for t in task_list.split() if t.strip().isdigit()]
+
+        # Read current stats
+        current: Dict[int, Any] = {}
+        for tid in tids:
+            s = self._read_thread_stat(pid, tid)
+            if s:
+                current[tid] = s  # (utime, stime, processor)
+
         sample = {}
-        for line in result.split("\n"):
-            if "TID" in line or not line.strip() or "Average" in line or "Linux" in line:
-                continue
-            parts = line.split()
-            if len(parts) < 11:
-                continue
-            try:
-                tid = parts[4]
-                if tid == "-":
+        if hasattr(self, "_prev_thread_stats") and self._prev_thread_stats:
+            hz = 100  # USER_HZ, standard on Linux
+            for tid, (utime, stime, processor) in current.items():
+                if tid not in self._prev_thread_stats:
                     continue
-                cpu_pct = float(parts[9])
-                psr = int(parts[10])
-                comm = parts[-1].replace("|__", "")
-                if tid not in sample:
-                    sample[tid] = {"name": comm, "cpu": cpu_pct, "core": psr}
-            except (ValueError, IndexError):
-                continue
+                prev_utime, prev_stime, _ = self._prev_thread_stats[tid]
+                delta = (utime - prev_utime) + (stime - prev_stime)
+                cpu_pct = round((delta / hz) * 100, 2)
+                comm = self._read_thread_comm(pid, tid)
+                sample[str(tid)] = {"name": comm, "cpu": cpu_pct, "core": processor}
+
+        self._prev_thread_stats = current
         return sample if sample else None
 
     def aggregate(self, include_timeseries: bool = True) -> Dict[str, Any]:
