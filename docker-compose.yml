@@ -1,0 +1,14 @@
+services:
+  cpu-service:
+    build: .
+    image: cpu-service:latest
+    container_name: cpu-service
+    ports:
+      - "5001:5001"
+    pid: host          # share host PID namespace so nsenter -t 1 can find host init
+    cap_add:
+      - SYS_PTRACE     # needed to attach to host processes
+      - SYS_ADMIN      # needed for namespace entry
+    security_opt:
+      - apparmor:unconfined   # prevent AppArmor from blocking nsenter (Ubuntu/Debian hosts)
+    restart: unless-stopped
