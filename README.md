@@ -1,31 +1,18 @@
-# CPU Collector — User Manual
-
 ## Table of Contents
 
 - [Project Structure](#project-structure)
 - [First-Time Startup](#first-time-startup)
-  - [Step 1 — Clone the Project](#step-1--clone-the-project)
-  - [Step 2 — Build and Start the Container](#step-2--build-and-start-the-container)
-  - [Step 3 — Verify That the Service Is Running](#step-3--verify-that-the-service-is-running)
-- [CPU Monitoring](#cpu-monitoring)
-  - [Start Monitoring](#start-monitoring)
-  - [Check Monitoring Status](#check-monitoring-status)
-  - [Stop Monitoring](#stop-monitoring)
-  - [Excel Data Format](#excel-data-format)
-- [CPU Plotting](#cpu-plotting)
-  - [Optional Parameters](#optional-parameters)
-  - [Plot Description](#plot-description)
-- [Thread Monitoring](#thread-monitoring)
-  - [Start Monitoring](#start-monitoring-1)
-  - [Check Monitoring Status](#check-monitoring-status-1)
-  - [Stop Monitoring](#stop-monitoring-1)
-  - [Excel Data Format](#excel-data-format-1)
-- [Thread Plotting](#thread-plotting)
-  - [Plot Description](#plot-description-1)
+- [Function 1.0 : CPU Monitoring](#function-10--cpu-monitoring)
+- [Function 1.1 : CPU Plotting](#function-11--cpu-plotting)
+- [Function 2.0 Thread Monitoring](#function-20-thread-monitoring)
+- [Function 2.1 Thread Plotting](#function-21-thread-plotting)
 - [Common Operation Flow](#common-operation-flow)
   - [Long-Term Monitoring, for Example Two Days](#long-term-monitoring-for-example-two-days)
   - [Continue After Restarting the Container](#continue-after-restarting-the-container)
 - [Notes](#notes)
+
+---
+
 ## Project Structure
 
 ```text
@@ -46,20 +33,20 @@ CPU-collector/
 
 ## First-Time Startup
 
-### Step 1 — Clone the Project
+Clone the Project
 
 ```bash
 git clone https://github.com/shuchu11/CPU-collector.git
 cd CPU-collector
 ```
 
-### Step 2 — Build and Start the Container
+Build and Start the Container
 
 ```bash
 sudo docker compose up -d --build
 ```
 
-### Step 3 — Verify That the Service Is Running
+Verify That the Service Is Running
 
 ```bash
 curl http://localhost:5001/health
@@ -68,7 +55,7 @@ curl http://localhost:5001/health
 
 ---
 
-## CPU Monitoring
+## Function 1.0 : CPU Monitoring
 
 ### Start Monitoring
 
@@ -78,20 +65,8 @@ curl -X POST http://localhost:5001/cpu/monitor/start \
   -d '{}'
 ```
 
-The xlsx filename will automatically include a timestamp, for example:
 
-```text
-cpu_log_20260504_100000.xlsx
-```
-
-You can also specify the filename manually:
-
-```bash
--d '{"xlsx": "/app/cpu_log_myrun.xlsx"}'
-```
-
-### Check Monitoring Status
-
+Check Monitoring Status
 ```bash
 curl http://localhost:5001/cpu/monitor/status
 
@@ -100,35 +75,27 @@ curl http://localhost:5001/cpu/monitor/status
 json
 {
   "running": true,
-  "xlsx": "/app/cpu_log_20260504_100000.xlsx",
+  "xlsx": "/app/cpu_log_20260504_100000.xlsx",   <-------- This is your file's name. Please remember it .
   "rows_written": 3600,
   "started_at": "2026-05-04T10:00:00"
 }
 ```
+> Data in the cpu_log_XXXX.xlsx will be stored as the format
+> | timestamp           | cpu0 | cpu1 | ... | cpu47 |
+> | ------------------- | ---- | ---- | --- | ----- |
+> | 2026-05-04 10:00:01 | 4.5  | 12.3 | ... | 21.7  |
+> 
+> Each row represents one second. Each cell records the CPU usage percentage of the corresponding CPU core.
 
-### Stop Monitoring
+How to Stop Monitoring
 
 ```bash
 curl -X POST http://localhost:5001/cpu/monitor/stop
 ```
 
-### Excel Data Format
-
-Sheet name:
-
-```text
-cpu_usage
-```
-
-| timestamp           | cpu0 | cpu1 | ... | cpu47 |
-| ------------------- | ---- | ---- | --- | ----- |
-| 2026-05-04 10:00:01 | 4.5  | 12.3 | ... | 21.7  |
-
-Each row represents one second. Each cell records the CPU usage percentage of the corresponding CPU core.
-
 ---
 
-## CPU Plotting
+## Function 1.1 : CPU Plotting
 
 Generate plots from the Excel data. This will create two separate image files:
 
@@ -161,39 +128,25 @@ The two image files will be saved directly in the project directory.
 | `start`   | Start time filter         | `"2026-05-04 10:00:00"` |
 | `end`     | End time filter           | `"2026-05-04 12:00:00"` |
 
-### Plot Description
 
-**Heatmap**
-File pattern:
+> `cpu_plot_heatmap_*.png` : 
+> Provides an overview of the minimum, average, and maximum CPU usage for each CPU core.
+> 
+> `cpu_plot_timeseries_*.png` :
+> Shows the CPU usage trend of each CPU core over time.
 
-```text
-cpu_plot_heatmap_*.png
-```
-
-Provides an overview of the minimum, average, and maximum CPU usage for each CPU core.
-
-**Timeseries**
-File pattern:
-
-```text
-cpu_plot_timeseries_*.png
-```
-
-Shows the CPU usage trend of each CPU core over time.
-
----
-
-## Thread Monitoring
+## Function 2.0 Thread Monitoring
 
 Monitor all threads of a specified process and record CPU usage and core affinity.
 
 ### Start Monitoring
 
+Please replace `{{Proccess name}}` with your proccess's name. ( List all proccess running on your server : `sudo docker exec cpu-service nsenter -t 1 -m -u -n -i bash -c "ps aux --no-header | awk '{print \$11}' | sort -u"` )
 ```bash
 curl -X POST http://localhost:5001/thread/monitor/start \
   -H "Content-Type: application/json" \
   -d '{
-    "pgrep": "nr-softmodem",
+    "pgrep": "{Proccess name}",
     "sample_interval": 10
   }'
 ```
@@ -204,43 +157,39 @@ curl -X POST http://localhost:5001/thread/monitor/start \
 | `sample_interval` | Sampling interval in seconds | `10`                    |
 | `xlsx`            | Output file path             | Automatically generated |
 
-### Check Monitoring Status
 
-```bash
-curl http://localhost:5001/thread/monitor/status
-```
-
-### Stop Monitoring
-
+How to Stop Monitoring
 ```bash
 curl -X POST http://localhost:5001/thread/monitor/stop
 ```
 
-### Excel Data Format
-
-Sheet name:
-
-```text
-thread_cpu
-```
-
-| timestamp           | tid    | name         | avg_cpu | min_cpu | max_cpu | primary_core | core_0 | core_1 | ... |
-| ------------------- | ------ | ------------ | ------- | ------- | ------- | ------------ | ------ | ------ | --- |
-| 2026-05-04 10:00:10 | 282158 | nr-softmodem | 45.2    | 30.1    | 89.3    | 3            | 0      | 0      | ... |
-
-A batch of data is written every `sample_interval` seconds. Each thread is recorded as one row.
-
-The values in the core columns represent the percentage of time that the thread ran on each CPU core.
+> **Excel Data Format**
+> 
+> Sheet name:
+> 
+> ```text
+> thread_cpu
+> ```
+> 
+> | timestamp           | tid    | name         | avg_cpu | min_cpu | max_cpu | primary_core | core_0 | core_1 | ... |
+> | ------------------- | ------ | ------------ | ------- | ------- | ------- | ------------ | ------ | ------ | --- |
+> | 2026-05-04 10:00:10 | 282158 | nr-softmodem | 45.2    | 30.1    | 89.3    | 3            | 0      | 0      | ... |
+> 
+> A batch of data is written every `sample_interval` seconds. Each thread is recorded as one row.
+>
+> The values in the core columns represent the percentage of time that the thread ran on each CPU core.
 
 ---
 
-## Thread Plotting
+## Function 2.1 Thread Plotting
 
+Please replace `{thread_log_xxx.xlsx}` with your `.xlsl` name ( You can use `curl http://localhost:5001/thread/monitor/status
+` to check your thread_log file's name)  
 ```bash
 curl -X POST http://localhost:5001/thread/plot \
   -H "Content-Type: application/json" \
   -d '{
-    "xlsx": "/app/thread_log_20260504_100000.xlsx",
+    "xlsx": "/app/{thread_log_xxx.xlsx}",
     "label": "Lavoisier Run 1"
   }'
 ```
@@ -254,25 +203,11 @@ Example response:
 }
 ```
 
-### Plot Description
-
-**Affinity Heatmap**
-File pattern:
-
-```text
-thread_plot_affinity_*.png
-```
-
+**Plot Description**
+`thread_plot_affinity_*.png` : 
 Shows the runtime distribution of each thread across CPU cores. This corresponds to the original Thread-to-Core Affinity plot from `bitrate_sweep.py`.
 
-**CPU Usage Heatmap**
-File pattern:
-
-```text
-thread_plot_cpu_usage_*.png
-```
-
-Shows the minimum, average, and maximum CPU usage of each thread.
+`thread_plot_cpu_usage_*.png` : Shows the minimum, average, and maximum CPU usage of each thread.
 
 ---
 
