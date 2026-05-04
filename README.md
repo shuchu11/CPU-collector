@@ -47,6 +47,9 @@ curl -X POST http://localhost:5001/cpu/plot \
   -H "Content-Type: application/json" \
   -d '{"xlsx": "/app/cpu_log.xlsx", "type": "both"}' \
   --output cpu_plot.png
+
+
+#### 執行後圖畫自動存在最上層目錄
 ```
 
 
