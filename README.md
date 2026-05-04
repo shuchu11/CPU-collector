@@ -65,21 +65,6 @@ curl -X POST http://localhost:5001/cpu/monitor/start \
   -d '{}'
 ```
 
-
-Check Monitoring Status
-```bash
-curl http://localhost:5001/cpu/monitor/status
-
-
-#### Log ####
-json
-{
-  "running": true,
-  "xlsx": "/app/cpu_log_20260504_100000.xlsx",   <-------- This is your file's name. Please remember it .
-  "rows_written": 3600,
-  "started_at": "2026-05-04T10:00:00"
-}
-```
 > Data in the cpu_log_XXXX.xlsx will be stored as the format
 > | timestamp           | cpu0 | cpu1 | ... | cpu47 |
 > | ------------------- | ---- | ---- | --- | ----- |
@@ -99,14 +84,30 @@ curl -X POST http://localhost:5001/cpu/monitor/stop
 
 Generate plots from the Excel data. This will create two separate image files:
 
+Please replace `{cpu_log_xxx.xlsx}` with your file's name ( How to check your file's name : `curl http://localhost:5001/cpu/monitor/status` )
+
 ```bash
 curl -X POST http://localhost:5001/cpu/plot \
   -H "Content-Type: application/json" \
   -d '{
-    "xlsx": "/app/cpu_log_20260504_100000.xlsx",
+    "xlsx": "/app/{cpu_log_xxx.xlsx}",
     "label": "my run"
   }'
 ```
+
+> Check Monitoring Status
+> ```bash
+> curl http://localhost:5001/cpu/monitor/status
+>
+> #### Log ####
+> json
+> {
+>   "running": true,
+>   "xlsx": "/app/cpu_log_20260504_100000.xlsx",   <-------- This is your file's name. Please remember it .
+>   "rows_written": 3600,
+>   "started_at": "2026-05-04T10:00:00"
+> }
+> ```
 
 Example response:
 
@@ -119,7 +120,7 @@ Example response:
 
 The two image files will be saved directly in the project directory.
 
-### Optional Parameters
+### ( Optional ) Parameters
 
 | Parameter | Description               | Example                 |
 | --------- | ------------------------- | ----------------------- |
