@@ -1,10 +1,13 @@
 """
 cpu_service.py — Standalone CPU Monitoring Microservice
-Extracted from sideloader service. Run directly:
-    python cpu_service.py
+Features:
+  - Background continuous monitoring (start/stop)
+  - Real-time append to Excel (one row per second, one col per core)
+  - Plot from Excel data (heatmap + timeseries)
 """
 
 import io
+import os
 import re
 import time
 import subprocess
@@ -14,16 +17,16 @@ from typing import Dict, List, Any, Optional
 from datetime import datetime
 
 import matplotlib
-matplotlib.use("Agg")  # non-interactive backend, safe inside Docker
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-import matplotlib.patches as mpatches
 import seaborn as sns
 import pandas as pd
+from openpyxl import load_workbook, Workbook
 
 from flask import Flask, jsonify, request, send_file
 
 app = Flask(__name__)
-PORT = 5001  # Change as needed
+PORT = 5001
 
 
 # ============================================================================
@@ -31,22 +34,17 @@ PORT = 5001  # Change as needed
 # ============================================================================
 
 def run_cmd(cmd: str, timeout: int = 30) -> Optional[str]:
-    """Execute shell command, return stdout or None on failure"""
     try:
         result = subprocess.run(
             cmd, shell=True, capture_output=True, text=True, timeout=timeout
         )
-        if result.returncode != 0:
-            return None
-        return result.stdout.strip()
+        return result.stdout.strip() if result.returncode == 0 else None
     except Exception:
         return None
 
 
 def nsenter(cmd: str, timeout: int = 30) -> Optional[str]:
-    """Execute command in host namespace via nsenter"""
-    full_cmd = f"nsenter -t 1 -m -u -n -i {cmd}"
-    return run_cmd(full_cmd, timeout)
+    return run_cmd(f"nsenter -t 1 -m -u -n -i {cmd}", timeout)
 
 
 # ============================================================================
@@ -54,20 +52,16 @@ def nsenter(cmd: str, timeout: int = 30) -> Optional[str]:
 # ============================================================================
 
 class BaseCollector(ABC):
-    """Base class for all monitoring collectors — enforces 1s sampling"""
-
     def __init__(self):
         self.samples = []
         self.timestamps = []
 
     @abstractmethod
-    def collect_sample(self) -> Dict[str, Any]:
+    def collect_sample(self) -> Optional[Dict[str, Any]]:
         pass
 
     def gather(self, duration: int, include_timeseries: bool = False) -> Dict[str, Any]:
-        """Gather samples for duration seconds at 1s intervals"""
-        self.samples = []
-        self.timestamps = []
+        self.samples, self.timestamps = [], []
         for _ in range(duration):
             ts = time.time()
             sample = self.collect_sample()
@@ -96,8 +90,6 @@ class BaseCollector(ABC):
 # ============================================================================
 
 class CPUCollector(BaseCollector):
-    """Monitor per-core CPU usage with detailed breakdown"""
-
     def __init__(self, include_breakdown: bool = False):
         super().__init__()
         self.prev_stats = None
@@ -107,25 +99,18 @@ class CPUCollector(BaseCollector):
         out = nsenter("cat /proc/stat")
         if not out:
             return {}
-
         cpu_stats = {}
         for line in out.split("\n"):
             if not line.startswith("cpu"):
                 continue
             parts = line.split()
-            cpu_name = parts[0]
             if len(parts) < 8:
                 continue
             values = [int(x) for x in parts[1:8]]
-            cpu_stats[cpu_name] = {
-                "user":    values[0],
-                "nice":    values[1],
-                "system":  values[2],
-                "idle":    values[3],
-                "iowait":  values[4],
-                "irq":     values[5],
-                "softirq": values[6],
-                "total":   sum(values),
+            cpu_stats[parts[0]] = {
+                "user": values[0], "nice": values[1], "system": values[2],
+                "idle": values[3], "iowait": values[4], "irq": values[5],
+                "softirq": values[6], "total": sum(values),
             }
         return cpu_stats
 
@@ -133,7 +118,6 @@ class CPUCollector(BaseCollector):
         current_stats = self._read_cpu_stats()
         if not current_stats:
             return None
-
         sample = {}
         if self.prev_stats:
             for cpu_name, current in current_stats.items():
@@ -141,68 +125,44 @@ class CPUCollector(BaseCollector):
                     continue
                 prev = self.prev_stats[cpu_name]
                 delta_total = current["total"] - prev["total"]
-
                 if delta_total == 0:
                     sample[cpu_name] = {"usage": 0.0}
-                    if self.include_breakdown:
-                        sample[cpu_name]["breakdown"] = {k: 0.0 for k in ("user", "system", "iowait", "irq", "softirq")}
                     continue
-
                 delta_idle = current["idle"] - prev["idle"]
-                usage = ((delta_total - delta_idle) / delta_total) * 100
-                sample[cpu_name] = {"usage": round(usage, 2)}
-
+                sample[cpu_name] = {
+                    "usage": round(((delta_total - delta_idle) / delta_total) * 100, 2)
+                }
                 if self.include_breakdown:
                     sample[cpu_name]["breakdown"] = {
                         k: round(((current[k] - prev[k]) / delta_total) * 100, 2)
                         for k in ("user", "system", "iowait", "irq", "softirq")
                     }
-
         self.prev_stats = current_stats
         return sample if sample else None
 
     def aggregate(self, include_timeseries: bool = True) -> Dict[str, Any]:
         if not self.samples:
             return {"error": "no samples collected"}
-
-        cpu_data = {}
+        cpu_data: Dict[str, list] = {}
         for sample in self.samples:
             for cpu_name, data in sample.items():
-                if cpu_name not in cpu_data:
-                    cpu_data[cpu_name] = {"usage": []}
-                    if self.include_breakdown:
-                        cpu_data[cpu_name]["breakdown"] = {k: [] for k in ("user", "system", "iowait", "irq", "softirq")}
-                cpu_data[cpu_name]["usage"].append(data["usage"])
-                if self.include_breakdown and "breakdown" in data:
-                    for k, v in data["breakdown"].items():
-                        cpu_data[cpu_name]["breakdown"][k].append(v)
+                cpu_data.setdefault(cpu_name, []).append(data["usage"])
 
         timestamps_rounded = [round(ts, 2) for ts in self.timestamps]
         result = {"duration": len(self.timestamps), "samples": len(self.samples), "cpus": {}}
-
-        for cpu_name, data in cpu_data.items():
-            usage_stats = self.get_stats(data["usage"])
+        for cpu_name, usages in cpu_data.items():
+            stats = self.get_stats(usages)
             if include_timeseries:
-                usage_stats["timeseries"] = {"timestamps": timestamps_rounded, "percent": data["usage"]}
-            result["cpus"][cpu_name] = {"usage": usage_stats}
+                stats["timeseries"] = {"timestamps": timestamps_rounded, "percent": usages}
+            result["cpus"][cpu_name] = {"usage": stats}
 
-            if self.include_breakdown:
-                result["cpus"][cpu_name]["breakdown"] = {}
-                for k, values in data["breakdown"].items():
-                    stats = self.get_stats(values)
-                    if include_timeseries:
-                        stats["timeseries"] = {"timestamps": timestamps_rounded, "percent": values}
-                    result["cpus"][cpu_name]["breakdown"][k] = stats
-
-        online_cpus = run_cmd("cat /sys/devices/system/cpu/online")
-        numbers = re.findall(r"\d+", online_cpus) if online_cpus else []
+        online_cpus = run_cmd("cat /sys/devices/system/cpu/online") or ""
+        numbers = re.findall(r"\d+", online_cpus)
         system_max_cpu = max(int(n) for n in numbers) if numbers else 0
-
         offline_cpus = [
-            cpu_id for cpu_id in range(system_max_cpu + 1)
-            if run_cmd(f"cat /sys/devices/system/cpu/cpu{cpu_id}/online 2>/dev/null") == "0"
+            i for i in range(system_max_cpu + 1)
+            if run_cmd(f"cat /sys/devices/system/cpu/cpu{i}/online 2>/dev/null") == "0"
         ]
-
         result["system_max_cpu"] = system_max_cpu
         result["offline_cpus"] = offline_cpus
         result["isolated_cpus"] = run_cmd("cat /sys/devices/system/cpu/isolated")
@@ -210,23 +170,19 @@ class CPUCollector(BaseCollector):
 
 
 class ContextSwitchCollector(BaseCollector):
-    """Monitor context switches per CPU"""
-
     def __init__(self, cpu_filter: Optional[List[int]] = None):
         super().__init__()
         self.cpu_filter = cpu_filter
-        self.prev_ctxt = {}
+        self.prev_ctxt: Dict[str, int] = {}
 
     def collect_sample(self) -> Optional[Dict[str, Any]]:
         out = nsenter("cat /proc/stat")
         if not out:
             return None
-
-        sample = {}
+        sample: Dict[str, Any] = {}
         for line in out.split("\n"):
             if line.startswith("ctxt"):
                 sample["total"] = int(line.split()[1])
-
         if self.cpu_filter:
             for cpu_id in self.cpu_filter:
                 schedstat = nsenter(f"cat /proc/schedstat | grep 'cpu{cpu_id} ' 2>/dev/null")
@@ -234,39 +190,31 @@ class ContextSwitchCollector(BaseCollector):
                     parts = schedstat.split()
                     if len(parts) >= 8:
                         sample[f"cpu{cpu_id}"] = int(parts[7])
-
         if self.prev_ctxt:
-            for key, value in sample.items():
+            for key, value in list(sample.items()):
                 if key in self.prev_ctxt:
                     sample[f"{key}_rate"] = value - self.prev_ctxt[key]
-
         self.prev_ctxt = dict(sample)
         return sample
 
     def aggregate(self, include_timeseries: bool = True) -> Dict[str, Any]:
         if not self.samples:
             return {"error": "no samples collected"}
-
         ctxt_data: Dict[str, list] = {}
         for sample in self.samples:
             for key, value in sample.items():
                 ctxt_data.setdefault(key, []).append(value)
-
         timestamps_rounded = [round(ts, 2) for ts in self.timestamps]
         result = {"duration": len(self.timestamps), "samples": len(self.samples), "context_switches": {}}
-
         for key, values in ctxt_data.items():
             stats = self.get_stats(values)
             if include_timeseries:
                 stats["timeseries"] = {"timestamps": timestamps_rounded, "count": values}
             result["context_switches"][key] = stats
-
         return result
 
 
 class CPUGovernorCollector:
-    """Check CPU governor settings (static, one-shot)"""
-
     @staticmethod
     def get_governor() -> Dict[str, Any]:
         out = run_cmd(
@@ -277,8 +225,6 @@ class CPUGovernorCollector:
 
 
 class CPUIdleCollector:
-    """Check CPU idle states (static, one-shot)"""
-
     @staticmethod
     def get_idle_states() -> Dict[str, Any]:
         out = run_cmd(
@@ -289,18 +235,14 @@ class CPUIdleCollector:
 
 
 class IRQAffinityCollector:
-    """Check IRQ affinity (static, one-shot)"""
-
     @staticmethod
     def get_affinity(pattern: str = "ens") -> Dict[str, Any]:
-        cmd = (
+        out = run_cmd(
             f"nsenter -t 1 -m -u -n -i bash -c "
             f"'grep -H . /proc/irq/*/smp_affinity_list | grep {pattern}'"
         )
-        out = run_cmd(cmd)
         if not out:
             return {"irq_affinity": {}}
-
         affinities = {}
         for line in out.split("\n"):
             if ":" in line:
@@ -311,85 +253,174 @@ class IRQAffinityCollector:
 
 
 # ============================================================================
-# ROUTES
+# BACKGROUND MONITOR — writes to Excel row-by-row
 # ============================================================================
 
-@app.route("/health", methods=["GET"])
-def health():
-    return jsonify({"status": "ok"})
+class BackgroundMonitor:
+    """
+    Runs a background thread that samples CPU every second and appends
+    one row per sample to an Excel file.
+
+    Excel layout (sheet: "cpu_usage"):
+        timestamp        | cpu0 | cpu1 | ... | cpuN
+        2026-05-04 10:00:01 | 4.5  | 12.3 | ...
+    """
+
+    def __init__(self):
+        self._thread: Optional[threading.Thread] = None
+        self._stop_event = threading.Event()
+        self._lock = threading.Lock()
+        self.xlsx_path: Optional[str] = None
+        self.running = False
+        self.rows_written = 0
+        self.started_at: Optional[str] = None
+        self._col_order: Optional[List[str]] = None
+        self._collector: Optional[CPUCollector] = None
+        self._write_lock = threading.Lock()   # separate lock just for file writes
+
+    # ------------------------------------------------------------------ #
+
+    def start(self, xlsx_path: str) -> Dict[str, Any]:
+        with self._lock:
+            if self.running:
+                return {"status": "already_running", "xlsx": self.xlsx_path}
+
+            self.xlsx_path = xlsx_path
+            self._stop_event.clear()
+            self.rows_written = 0
+            self.started_at = datetime.now().isoformat(timespec="seconds")
+            self._col_order = None
+            self._collector = CPUCollector()
+
+            os.makedirs(os.path.dirname(os.path.abspath(xlsx_path)), exist_ok=True)
+            self._init_workbook(xlsx_path)
+
+            self._thread = threading.Thread(target=self._run, daemon=True)
+            self._thread.start()
+            self.running = True
+
+        return {"status": "started", "xlsx": xlsx_path, "started_at": self.started_at}
+
+    def stop(self) -> Dict[str, Any]:
+        with self._lock:
+            if not self.running:
+                return {"status": "not_running"}
+            self._stop_event.set()
+
+        if self._thread:
+            self._thread.join(timeout=5)
+
+        with self._lock:
+            self.running = False
+
+        return {
+            "status": "stopped",
+            "xlsx": self.xlsx_path,
+            "rows_written": self.rows_written,
+            "started_at": self.started_at,
+            "stopped_at": datetime.now().isoformat(timespec="seconds"),
+        }
+
+    def status(self) -> Dict[str, Any]:
+        with self._lock:
+            return {
+                "running": self.running,
+                "xlsx": self.xlsx_path,
+                "rows_written": self.rows_written,
+                "started_at": self.started_at,
+            }
+
+    # ------------------------------------------------------------------ #
+
+    def _init_workbook(self, path: str):
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "cpu_usage"
+        wb.save(path)
+
+    @staticmethod
+    def _sort_cpu_keys(keys: List[str]) -> List[str]:
+        def _k(k):
+            m = re.match(r"^cpu(\d+)$", k)
+            return (0, int(m.group(1))) if m else (1, k)
+        return sorted(keys, key=_k)
+
+    def _append_row(self, timestamp: str, sample: Dict[str, Any]):
+        if self._col_order is None:
+            core_keys = [k for k in sample if re.match(r"^cpu\d+$", k)]
+            self._col_order = self._sort_cpu_keys(core_keys)
+
+        row = [timestamp] + [
+            sample.get(cpu, {}).get("usage", None) for cpu in self._col_order
+        ]
+
+        with self._write_lock:
+            wb = load_workbook(self.xlsx_path)
+            ws = wb["cpu_usage"]
+            # Write header on first data row
+            if ws.max_row == 1 and ws["A1"].value is None:
+                ws.append(["timestamp"] + self._col_order)
+            ws.append(row)
+            wb.save(self.xlsx_path)
+
+    def _run(self):
+        # Prime collector — first call builds prev_stats, returns nothing
+        self._collector.collect_sample()
+        time.sleep(1)
+
+        while not self._stop_event.is_set():
+            ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            sample = self._collector.collect_sample()
+            if sample:
+                try:
+                    self._append_row(ts, sample)
+                    with self._lock:
+                        self.rows_written += 1
+                except Exception as e:
+                    print(f"[BackgroundMonitor] write error: {e}")
+            time.sleep(1)
 
 
-@app.route("/cpu/monitor", methods=["POST"])
-def cpu_monitor():
-    """Monitor per-core CPU usage with optional breakdown"""
-    data = request.json or {}
-    collector = CPUCollector(include_breakdown=data.get("breakdown", False))
-    result = collector.gather(
-        data.get("duration", 10),
-        include_timeseries=data.get("include_timeseries", True),
-    )
-    return jsonify(result)
-
-
-@app.route("/cpu/governor", methods=["GET"])
-def cpu_governor():
-    """Get CPU frequency governor"""
-    return jsonify(CPUGovernorCollector.get_governor())
-
-
-@app.route("/cpu/idle_states", methods=["GET"])
-def cpu_idle_states():
-    """Get CPU idle state configuration"""
-    return jsonify(CPUIdleCollector.get_idle_states())
-
-
-@app.route("/cpu/context_switches", methods=["POST"])
-def context_switches_monitor():
-    """Monitor context switches over time"""
-    data = request.json or {}
-    collector = ContextSwitchCollector(cpu_filter=data.get("cpu_filter"))
-    result = collector.gather(data.get("duration", 10))
-    return jsonify(result)
-
-
-@app.route("/irq/affinity", methods=["GET"])
-def irq_affinity():
-    """Get IRQ affinity for network interfaces"""
-    return jsonify(IRQAffinityCollector.get_affinity(request.args.get("pattern", "ens")))
+# Global singleton
+_monitor = BackgroundMonitor()
 
 
 # ============================================================================
-# PLOT HELPERS
+# PLOT HELPERS — read from Excel
 # ============================================================================
 
 def _sort_cpu_keys(keys: List[str]) -> List[str]:
-    """Sort cpu0, cpu1 ... cpu47 numerically, 'cpu' (aggregate) last"""
-    def _key(k):
+    def _k(k):
         m = re.match(r"^cpu(\d+)$", k)
         return (0, int(m.group(1))) if m else (1, k)
-    return sorted(keys, key=_key)
+    return sorted(keys, key=_k)
 
 
-def _build_heatmap_png(cpu_data: Dict[str, Any], title: str) -> io.BytesIO:
-    """
-    Per-core CPU usage heatmap (min / avg / max).
-    Expects cpu_data = { "cpu0": {"usage": {"min":…, "avg":…, "max":…}}, … }
-    """
-    sorted_keys = _sort_cpu_keys([k for k in cpu_data if k != "cpu"])
+def _load_excel(xlsx_path: str, start: Optional[str], end: Optional[str]) -> pd.DataFrame:
+    df = pd.read_excel(xlsx_path, sheet_name="cpu_usage", engine="openpyxl")
+    df["timestamp"] = pd.to_datetime(df["timestamp"])
+    if start:
+        df = df[df["timestamp"] >= pd.to_datetime(start)]
+    if end:
+        df = df[df["timestamp"] <= pd.to_datetime(end)]
+    if df.empty:
+        raise ValueError("No data in the specified time range")
+    return df
 
-    rows, labels = [], []
-    for cpu_name in sorted_keys:
-        u = cpu_data[cpu_name]["usage"]
-        rows.append([u.get("min", 0), u.get("avg", 0), u.get("max", 0)])
-        labels.append(cpu_name)
 
-    df = pd.DataFrame(rows, index=labels, columns=["min %", "avg %", "max %"])
+def _build_heatmap_from_excel(df: pd.DataFrame, label: str) -> io.BytesIO:
+    cpu_cols = _sort_cpu_keys([c for c in df.columns if re.match(r"^cpu\d+$", c)])
+    stats = pd.DataFrame({
+        "min %": df[cpu_cols].min(),
+        "avg %": df[cpu_cols].mean().round(2),
+        "max %": df[cpu_cols].max(),
+    }).loc[cpu_cols]
 
-    fig_h = max(6, len(labels) * 0.35)
+    fig_h = max(6, len(cpu_cols) * 0.35)
     fig, ax = plt.subplots(figsize=(8, fig_h))
-    sns.heatmap(df, annot=True, fmt=".1f", cmap="YlOrRd",
+    sns.heatmap(stats, annot=True, fmt=".1f", cmap="YlOrRd",
                 cbar_kws={"label": "CPU %"}, ax=ax)
-    ax.set_title(title)
+    ax.set_title(f"CPU Usage Heatmap — {label}")
     ax.set_xlabel("Metric")
     ax.set_ylabel("CPU Core")
     plt.tight_layout()
@@ -401,36 +432,18 @@ def _build_heatmap_png(cpu_data: Dict[str, Any], title: str) -> io.BytesIO:
     return buf
 
 
-def _build_timeseries_png(cpu_data: Dict[str, Any], title: str) -> io.BytesIO:
-    """
-    Per-core CPU usage timeseries line chart.
-    Expects timeseries key inside each cpu's usage dict.
-    """
-    sorted_keys = _sort_cpu_keys([k for k in cpu_data if k != "cpu"])
-
-    # Collect series that actually have timeseries data
-    series = {}
-    timestamps = None
-    for cpu_name in sorted_keys:
-        ts_data = cpu_data[cpu_name]["usage"].get("timeseries")
-        if ts_data:
-            if timestamps is None:
-                raw_ts = ts_data["timestamps"]
-                # Normalise to seconds-since-start
-                t0 = raw_ts[0]
-                timestamps = [round(t - t0, 2) for t in raw_ts]
-            series[cpu_name] = ts_data["percent"]
-
-    if not series or timestamps is None:
-        raise ValueError("No timeseries data found in JSON")
+def _build_timeseries_from_excel(df: pd.DataFrame, label: str) -> io.BytesIO:
+    cpu_cols = _sort_cpu_keys([c for c in df.columns if re.match(r"^cpu\d+$", c)])
+    t0 = df["timestamp"].iloc[0]
+    elapsed = (df["timestamp"] - t0).dt.total_seconds().tolist()
 
     fig, ax = plt.subplots(figsize=(14, 6))
     cmap = plt.get_cmap("tab20")
-    for i, (cpu_name, values) in enumerate(series.items()):
-        ax.plot(timestamps, values, label=cpu_name,
+    for i, col in enumerate(cpu_cols):
+        ax.plot(elapsed, df[col].tolist(), label=col,
                 color=cmap(i % 20), linewidth=1)
 
-    ax.set_title(title)
+    ax.set_title(f"CPU Usage Timeseries — {label}")
     ax.set_xlabel("Time (s)")
     ax.set_ylabel("CPU Usage (%)")
     ax.set_ylim(0, 100)
@@ -445,54 +458,36 @@ def _build_timeseries_png(cpu_data: Dict[str, Any], title: str) -> io.BytesIO:
     return buf
 
 
-def _build_combined_png(cpu_data: Dict[str, Any], label: str) -> io.BytesIO:
-    """Combine heatmap + timeseries side-by-side into one PNG"""
-    sorted_keys = _sort_cpu_keys([k for k in cpu_data if k != "cpu"])
+def _build_combined_from_excel(df: pd.DataFrame, label: str) -> io.BytesIO:
+    cpu_cols = _sort_cpu_keys([c for c in df.columns if re.match(r"^cpu\d+$", c)])
+    stats = pd.DataFrame({
+        "min %": df[cpu_cols].min(),
+        "avg %": df[cpu_cols].mean().round(2),
+        "max %": df[cpu_cols].max(),
+    }).loc[cpu_cols]
 
-    # --- heatmap data ---
-    rows, hlabels = [], []
-    for cpu_name in sorted_keys:
-        u = cpu_data[cpu_name]["usage"]
-        rows.append([u.get("min", 0), u.get("avg", 0), u.get("max", 0)])
-        hlabels.append(cpu_name)
-    df = pd.DataFrame(rows, index=hlabels, columns=["min %", "avg %", "max %"])
+    t0 = df["timestamp"].iloc[0]
+    elapsed = (df["timestamp"] - t0).dt.total_seconds().tolist()
 
-    # --- timeseries data ---
-    series, timestamps = {}, None
-    for cpu_name in sorted_keys:
-        ts_data = cpu_data[cpu_name]["usage"].get("timeseries")
-        if ts_data:
-            if timestamps is None:
-                t0 = ts_data["timestamps"][0]
-                timestamps = [round(t - t0, 2) for t in ts_data["timestamps"]]
-            series[cpu_name] = ts_data["percent"]
+    fig_h = max(8, len(cpu_cols) * 0.35)
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(22, fig_h))
 
-    has_ts = bool(series and timestamps)
-    fig_h = max(8, len(sorted_keys) * 0.35)
-    fig, axes = plt.subplots(1, 2 if has_ts else 1,
-                             figsize=(20 if has_ts else 9, fig_h))
-    if not has_ts:
-        axes = [axes]
+    sns.heatmap(stats, annot=True, fmt=".1f", cmap="YlOrRd",
+                cbar_kws={"label": "CPU %"}, ax=ax1)
+    ax1.set_title(f"CPU Usage Heatmap — {label}")
+    ax1.set_xlabel("Metric")
+    ax1.set_ylabel("CPU Core")
 
-    # heatmap
-    sns.heatmap(df, annot=True, fmt=".1f", cmap="YlOrRd",
-                cbar_kws={"label": "CPU %"}, ax=axes[0])
-    axes[0].set_title(f"CPU Usage Heatmap — {label}")
-    axes[0].set_xlabel("Metric")
-    axes[0].set_ylabel("CPU Core")
-
-    # timeseries
-    if has_ts:
-        cmap = plt.get_cmap("tab20")
-        for i, (cpu_name, values) in enumerate(series.items()):
-            axes[1].plot(timestamps, values, label=cpu_name,
-                         color=cmap(i % 20), linewidth=1)
-        axes[1].set_title(f"CPU Usage Timeseries — {label}")
-        axes[1].set_xlabel("Time (s)")
-        axes[1].set_ylabel("CPU Usage (%)")
-        axes[1].set_ylim(0, 100)
-        axes[1].legend(loc="upper right", fontsize=7, ncol=4)
-        axes[1].grid(True, alpha=0.3)
+    cmap = plt.get_cmap("tab20")
+    for i, col in enumerate(cpu_cols):
+        ax2.plot(elapsed, df[col].tolist(), label=col,
+                 color=cmap(i % 20), linewidth=1)
+    ax2.set_title(f"CPU Usage Timeseries — {label}")
+    ax2.set_xlabel("Time (s)")
+    ax2.set_ylabel("CPU Usage (%)")
+    ax2.set_ylim(0, 100)
+    ax2.legend(loc="upper right", fontsize=7, ncol=4)
+    ax2.grid(True, alpha=0.3)
 
     plt.tight_layout()
     buf = io.BytesIO()
@@ -503,49 +498,128 @@ def _build_combined_png(cpu_data: Dict[str, Any], label: str) -> io.BytesIO:
 
 
 # ============================================================================
-# PLOT ROUTE
+# ROUTES
 # ============================================================================
+
+@app.route("/health", methods=["GET"])
+def health():
+    return jsonify({"status": "ok"})
+
+
+# --- one-shot monitor (kept for compatibility) ----------------------------
+
+@app.route("/cpu/monitor", methods=["POST"])
+def cpu_monitor():
+    """Blocking one-shot monitor"""
+    data = request.json or {}
+    collector = CPUCollector(include_breakdown=data.get("breakdown", False))
+    result = collector.gather(
+        data.get("duration", 10),
+        include_timeseries=data.get("include_timeseries", True),
+    )
+    return jsonify(result)
+
+
+# --- background monitor ---------------------------------------------------
+
+@app.route("/cpu/monitor/start", methods=["POST"])
+def cpu_monitor_start():
+    """
+    Start continuous background monitoring, writing every second to Excel.
+
+    POST body:
+    {
+        "xlsx": "/data/cpu_log.xlsx"    # path inside container
+    }
+    """
+    body = request.json or {}
+    xlsx_path = body.get("xlsx")
+    if not xlsx_path:
+        return jsonify({"error": "missing 'xlsx' field"}), 400
+    return jsonify(_monitor.start(xlsx_path))
+
+
+@app.route("/cpu/monitor/stop", methods=["POST"])
+def cpu_monitor_stop():
+    """Stop background monitoring"""
+    return jsonify(_monitor.stop())
+
+
+@app.route("/cpu/monitor/status", methods=["GET"])
+def cpu_monitor_status():
+    """Get background monitor status"""
+    return jsonify(_monitor.status())
+
+
+# --- plot from Excel -------------------------------------------------------
 
 @app.route("/cpu/plot", methods=["POST"])
 def cpu_plot():
     """
-    Generate CPU usage plots from existing JSON data.
+    Generate CPU usage plots from Excel data.
 
-    POST body (JSON):
+    POST body:
     {
-        "data":  { ...output from /cpu/monitor... },   # required
-        "type":  "heatmap" | "timeseries" | "both",   # default: "both"
-        "label": "optional title suffix"               # default: current timestamp
+        "xlsx":  "/data/cpu_log.xlsx",          # required
+        "type":  "heatmap|timeseries|both",      # default: "both"
+        "label": "my run",                       # optional title suffix
+        "start": "2026-05-04 10:00:00",          # optional time filter
+        "end":   "2026-05-04 12:00:00"           # optional time filter
     }
 
     Returns: image/png
     """
     body = request.json or {}
-
-    cpu_json = body.get("data")
-    if not cpu_json:
-        return jsonify({"error": "missing 'data' field"}), 400
-
-    cpu_data = cpu_json.get("cpus")
-    if not cpu_data:
-        return jsonify({"error": "'data' must contain a 'cpus' key (output of /cpu/monitor)"}), 400
+    xlsx_path = body.get("xlsx")
+    if not xlsx_path:
+        return jsonify({"error": "missing 'xlsx' field"}), 400
+    if not os.path.exists(xlsx_path):
+        return jsonify({"error": f"file not found: {xlsx_path}"}), 404
 
     plot_type = body.get("type", "both")
     label = body.get("label") or datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    start = body.get("start")
+    end = body.get("end")
 
     try:
+        df = _load_excel(xlsx_path, start, end)
         if plot_type == "heatmap":
-            buf = _build_heatmap_png(cpu_data, f"CPU Usage Heatmap — {label}")
+            buf = _build_heatmap_from_excel(df, label)
         elif plot_type == "timeseries":
-            buf = _build_timeseries_png(cpu_data, f"CPU Usage Timeseries — {label}")
-        else:  # "both"
-            buf = _build_combined_png(cpu_data, label)
+            buf = _build_timeseries_from_excel(df, label)
+        else:
+            buf = _build_combined_from_excel(df, label)
     except ValueError as e:
         return jsonify({"error": str(e)}), 422
     except Exception as e:
-        return jsonify({"error": f"plot generation failed: {e}"}), 500
+        return jsonify({"error": f"plot failed: {e}"}), 500
 
     return send_file(buf, mimetype="image/png")
+
+
+# --- other endpoints (unchanged) ------------------------------------------
+
+@app.route("/cpu/governor", methods=["GET"])
+def cpu_governor():
+    return jsonify(CPUGovernorCollector.get_governor())
+
+
+@app.route("/cpu/idle_states", methods=["GET"])
+def cpu_idle_states():
+    return jsonify(CPUIdleCollector.get_idle_states())
+
+
+@app.route("/cpu/context_switches", methods=["POST"])
+def context_switches_monitor():
+    data = request.json or {}
+    collector = ContextSwitchCollector(cpu_filter=data.get("cpu_filter"))
+    result = collector.gather(data.get("duration", 10))
+    return jsonify(result)
+
+
+@app.route("/irq/affinity", methods=["GET"])
+def irq_affinity():
+    return jsonify(IRQAffinityCollector.get_affinity(request.args.get("pattern", "ens")))
 
 
 # ============================================================================
@@ -553,4 +627,5 @@ def cpu_plot():
 # ============================================================================
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=PORT, debug=True, use_reloader=False)
+    # debug=False for long-running stability
+    app.run(host="0.0.0.0", port=PORT, debug=False, use_reloader=False)
