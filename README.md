@@ -1,258 +1,338 @@
-# Structure
-```
+# CPU Collector — User Manual
+
+## Table of Contents
+
+- [Project Structure](#project-structure)
+- [First-Time Startup](#first-time-startup)
+  - [Step 1 — Clone the Project](#step-1--clone-the-project)
+  - [Step 2 — Build and Start the Container](#step-2--build-and-start-the-container)
+  - [Step 3 — Verify That the Service Is Running](#step-3--verify-that-the-service-is-running)
+- [CPU Monitoring](#cpu-monitoring)
+  - [Start Monitoring](#start-monitoring)
+  - [Check Monitoring Status](#check-monitoring-status)
+  - [Stop Monitoring](#stop-monitoring)
+  - [Excel Data Format](#excel-data-format)
+- [CPU Plotting](#cpu-plotting)
+  - [Optional Parameters](#optional-parameters)
+  - [Plot Description](#plot-description)
+- [Thread Monitoring](#thread-monitoring)
+  - [Start Monitoring](#start-monitoring-1)
+  - [Check Monitoring Status](#check-monitoring-status-1)
+  - [Stop Monitoring](#stop-monitoring-1)
+  - [Excel Data Format](#excel-data-format-1)
+- [Thread Plotting](#thread-plotting)
+  - [Plot Description](#plot-description-1)
+- [Common Operation Flow](#common-operation-flow)
+  - [Long-Term Monitoring, for Example Two Days](#long-term-monitoring-for-example-two-days)
+  - [Continue After Restarting the Container](#continue-after-restarting-the-container)
+- [Notes](#notes)
+## Project Structure
+
+```text
 CPU-collector/
-├── cpu_service.py
+├── cpu_service.py       # Main program
 ├── Dockerfile
 ├── docker-compose.yml
 ├── requirements.txt
-└── cpu_log.xlsx          ← Excel 就直接存在這裡
+├── cpu_log_<timestamp>.xlsx        # CPU monitoring data, automatically generated
+├── thread_log_<timestamp>.xlsx     # Thread monitoring data, automatically generated
+├── cpu_plot_heatmap_<timestamp>.png
+├── cpu_plot_timeseries_<timestamp>.png
+├── thread_plot_affinity_<timestamp>.png
+└── thread_plot_cpu_usage_<timestamp>.png
 ```
 
-## Build your image
-Git clone this repo first
+---
+
+## First-Time Startup
+
+### Step 1 — Clone the Project
+
+```bash
+git clone https://github.com/shuchu11/CPU-collector.git
+cd CPU-collector
 ```
-cd CPU-collector/
+
+### Step 2 — Build and Start the Container
+
+```bash
 sudo docker compose up -d --build
 ```
 
-## Steps
+### Step 3 — Verify That the Service Is Running
 
+```bash
+curl http://localhost:5001/health
+# Expected response: {"status": "ok"}
 ```
-# 開始監測
+
+---
+
+## CPU Monitoring
+
+### Start Monitoring
+
+```bash
 curl -X POST http://localhost:5001/cpu/monitor/start \
   -H "Content-Type: application/json" \
-  -d '{"xlsx": "/app/cpu_log.xlsx"}'
-
-##### Excel 檔案結構會長這樣( Excel 存在 host 的 CPU-collector/ 目錄 ) :
-
-#####################################################################
-**規則：**
-- 每秒一行
-- 第一欄永遠是 timestamp（格式 YYYY-MM-DD HH:MM:SS）
-- 之後每欄是一個 CPU core，順序從 cpu0 到 cpu47（按數字排序）
-- 每格的值是該秒該 core 的使用率（%），例如 4.5 代表 4.5%
-#####################################################################
-
-| timestamp           | cpu0 | cpu1 | cpu2 | ... | cpu47 |
-| ------------------- | ---- | ---- | ---- | --- | ----- |
-| 2026-05-04 10:00:01 | 4.5  | 12.3 | 0.0  | ... | 21.7  |
-| 2026-05-04 10:00:02 | 3.9  | 8.1  | 1.0  | ... | 19.2  |
-| 2026-05-04 10:00:03 | 5.2  | 15.6 | 0.0  | ... | 23.4  |
-| ...                 | ...  | ...  | ...  | ... | ...   |
+  -d '{}'
 ```
 
+The xlsx filename will automatically include a timestamp, for example:
 
-
+```text
+cpu_log_20260504_100000.xlsx
 ```
-# 畫圖
+
+You can also specify the filename manually:
+
+```bash
+-d '{"xlsx": "/app/cpu_log_myrun.xlsx"}'
+```
+
+### Check Monitoring Status
+
+```bash
+curl http://localhost:5001/cpu/monitor/status
+
+
+#### Log ####
+json
+{
+  "running": true,
+  "xlsx": "/app/cpu_log_20260504_100000.xlsx",
+  "rows_written": 3600,
+  "started_at": "2026-05-04T10:00:00"
+}
+```
+
+### Stop Monitoring
+
+```bash
+curl -X POST http://localhost:5001/cpu/monitor/stop
+```
+
+### Excel Data Format
+
+Sheet name:
+
+```text
+cpu_usage
+```
+
+| timestamp           | cpu0 | cpu1 | ... | cpu47 |
+| ------------------- | ---- | ---- | --- | ----- |
+| 2026-05-04 10:00:01 | 4.5  | 12.3 | ... | 21.7  |
+
+Each row represents one second. Each cell records the CPU usage percentage of the corresponding CPU core.
+
+---
+
+## CPU Plotting
+
+Generate plots from the Excel data. This will create two separate image files:
+
+```bash
 curl -X POST http://localhost:5001/cpu/plot \
   -H "Content-Type: application/json" \
-  -d '{"xlsx": "/app/cpu_log.xlsx", "type": "both"}' \
-  --output cpu_plot.png
-
-
-#### 執行後圖畫自動存在最上層目錄
+  -d '{
+    "xlsx": "/app/cpu_log_20260504_100000.xlsx",
+    "label": "my run"
+  }'
 ```
 
+Example response:
 
+```json
+{
+  "heatmap": "/app/cpu_plot_heatmap_20260504_102300.png",
+  "timeseries": "/app/cpu_plot_timeseries_20260504_102300.png"
+}
 ```
-# 確認 container 狀態
-sudo docker compose ps
 
-# 測試 health check
-curl http://localhost:5001/health
+The two image files will be saved directly in the project directory.
 
-# 停止監測
+### Optional Parameters
+
+| Parameter | Description               | Example                 |
+| --------- | ------------------------- | ----------------------- |
+| `xlsx`    | Excel file path, required | `/app/cpu_log_xxx.xlsx` |
+| `label`   | Chart title suffix        | `"Day 1 Test"`          |
+| `start`   | Start time filter         | `"2026-05-04 10:00:00"` |
+| `end`     | End time filter           | `"2026-05-04 12:00:00"` |
+
+### Plot Description
+
+**Heatmap**
+File pattern:
+
+```text
+cpu_plot_heatmap_*.png
+```
+
+Provides an overview of the minimum, average, and maximum CPU usage for each CPU core.
+
+**Timeseries**
+File pattern:
+
+```text
+cpu_plot_timeseries_*.png
+```
+
+Shows the CPU usage trend of each CPU core over time.
+
+---
+
+## Thread Monitoring
+
+Monitor all threads of a specified process and record CPU usage and core affinity.
+
+### Start Monitoring
+
+```bash
+curl -X POST http://localhost:5001/thread/monitor/start \
+  -H "Content-Type: application/json" \
+  -d '{
+    "pgrep": "nr-softmodem",
+    "sample_interval": 10
+  }'
+```
+
+| Parameter         | Description                  | Default Value           |
+| ----------------- | ---------------------------- | ----------------------- |
+| `pgrep`           | Process name to monitor      | `nr-softmodem`          |
+| `sample_interval` | Sampling interval in seconds | `10`                    |
+| `xlsx`            | Output file path             | Automatically generated |
+
+### Check Monitoring Status
+
+```bash
+curl http://localhost:5001/thread/monitor/status
+```
+
+### Stop Monitoring
+
+```bash
+curl -X POST http://localhost:5001/thread/monitor/stop
+```
+
+### Excel Data Format
+
+Sheet name:
+
+```text
+thread_cpu
+```
+
+| timestamp           | tid    | name         | avg_cpu | min_cpu | max_cpu | primary_core | core_0 | core_1 | ... |
+| ------------------- | ------ | ------------ | ------- | ------- | ------- | ------------ | ------ | ------ | --- |
+| 2026-05-04 10:00:10 | 282158 | nr-softmodem | 45.2    | 30.1    | 89.3    | 3            | 0      | 0      | ... |
+
+A batch of data is written every `sample_interval` seconds. Each thread is recorded as one row.
+
+The values in the core columns represent the percentage of time that the thread ran on each CPU core.
+
+---
+
+## Thread Plotting
+
+```bash
+curl -X POST http://localhost:5001/thread/plot \
+  -H "Content-Type: application/json" \
+  -d '{
+    "xlsx": "/app/thread_log_20260504_100000.xlsx",
+    "label": "Lavoisier Run 1"
+  }'
+```
+
+Example response:
+
+```json
+{
+  "affinity": "/app/thread_plot_affinity_20260504_102300.png",
+  "cpu_usage": "/app/thread_plot_cpu_usage_20260504_102300.png"
+}
+```
+
+### Plot Description
+
+**Affinity Heatmap**
+File pattern:
+
+```text
+thread_plot_affinity_*.png
+```
+
+Shows the runtime distribution of each thread across CPU cores. This corresponds to the original Thread-to-Core Affinity plot from `bitrate_sweep.py`.
+
+**CPU Usage Heatmap**
+File pattern:
+
+```text
+thread_plot_cpu_usage_*.png
+```
+
+Shows the minimum, average, and maximum CPU usage of each thread.
+
+---
+
+## Common Operation Flow
+
+### Long-Term Monitoring, for Example Two Days
+
+```bash
+# 1. Start CPU and Thread monitoring at the same time
+curl -X POST http://localhost:5001/cpu/monitor/start \
+  -H "Content-Type: application/json" \
+  -d '{}'
+
+curl -X POST http://localhost:5001/thread/monitor/start \
+  -H "Content-Type: application/json" \
+  -d '{"pgrep": "nr-softmodem", "sample_interval": 10}'
+
+# 2. Check status at any time
+curl http://localhost:5001/cpu/monitor/status
+curl http://localhost:5001/thread/monitor/status
+
+# 3. Generate plots at any time without stopping monitoring
+curl -X POST http://localhost:5001/cpu/plot \
+  -H "Content-Type: application/json" \
+  -d '{"xlsx": "/app/cpu_log_<timestamp>.xlsx", "label": "intermediate check"}'
+
+# 4. Stop monitoring
+curl -X POST http://localhost:5001/cpu/monitor/stop
+curl -X POST http://localhost:5001/thread/monitor/stop
+
+# 5. Generate final plots
+curl -X POST http://localhost:5001/thread/plot \
+  -H "Content-Type: application/json" \
+  -d '{"xlsx": "/app/thread_log_<timestamp>.xlsx", "label": "final result"}'
+```
+
+### Continue After Restarting the Container
+
+The Excel data is stored in the host project directory, so it will not be lost after restarting the container.
+
+```bash
 sudo docker compose down
-```
+sudo docker compose up -d
 
-
-## Appendix
-
-
-# BMC 與 OS 可收集的 CPU 資料與量測方式整理
-
-## 1. 總覽
-
-伺服器上的 CPU 資訊大致可以分成兩類來源：
-
-| 來源 | 主要用途 | 是否依賴 OS 開機 |
-|---|---|---|
-| BMC / iDRAC / iLO / XCC | 硬體健康監控、遠端管理、溫度、電源、風扇、硬體狀態 | 大多不依賴 OS |
-| OS / Linux | CPU 使用率、Load Average、Process 使用量、Core 使用率、排程狀態 | 需要 OS 正常運作 |
-
-BMC 主要負責「硬體層級監控」，OS 主要負責「系統運作與 CPU loading 分析」。
-
-<img width="937" height="723" alt="image" src="https://github.com/user-attachments/assets/00992742-c314-4c8c-a6b3-8f42659e1335" />
-
----
-<img width="938" height="710" alt="image" src="https://github.com/user-attachments/assets/690c5cc3-0e19-4991-993f-b6e5a671d5a3" />
-
----
-
-## 2. BMC 可以收集哪些 CPU 相關資料？
-
-BMC 是主機板上的獨立管理控制器，即使 OS 沒有開機，BMC 通常仍然可以運作。
-
-常見 BMC 可收集的 CPU / 系統硬體資料如下：
-
-| 資料類型 | 說明 | 常見來源 |
-|---|---|---|
-| CPU Temperature | CPU 溫度 | CPU 內建溫度感測器、CPU socket 附近溫度感測器 |
-| CPU Power | CPU 功耗 | VRM、CPU RAPL、PMBus、平台電源監控 |
-| CPU Voltage | CPU 電壓 | VRM 電壓監控、主機板硬體監控晶片 |
-| Fan Speed | 風扇轉速 | 風扇 Tachometer 訊號 |
-| System Power | 整機功耗 | PSU 電源供應器、PMBus、主機板電源監控 |
-| CPU Hardware Status | CPU 是否存在、錯誤狀態、硬體告警 | BMC Sensor / SEL / Redfish |
-
----
-
-## 3. BMC 的資料是怎麼量測的？
-
-BMC 多數硬體資料不是從 OS 檔案讀取，而是透過硬體感測器與管理匯流排取得。
-
-整體概念如下：
-
-```text
-CPU / VRM / PSU / Fan / Sensor Chip
-        ↓
-I2C / SMBus / PMBus / PECI / IPMI Sensor Interface
-        ↓
-BMC
-        ↓
-Web UI / IPMI / Redfish
-```
-
-- BMC picture
-<img width="1227" height="866" alt="image" src="https://github.com/user-attachments/assets/19f188d5-0b5b-4a39-89f6-b5837b53ffb3" />
-<img width="1283" height="681" alt="image" src="https://github.com/user-attachments/assets/02ba2955-2994-4db4-8401-6b220855da6f" />
-
-# 4. OS 如何計算 CPU Usage？
-
-Linux 的 CPU usage 通常是從以下檔案計算：
-
-```bash
-/proc/stat
-```
-
-查看內容：
-
-```bash
-cat /proc/stat | head
-```
-
-會看到類似以下內容：
-
-```text
-cpu  123456 789 34567 987654 1234 0 456 0 0 0
-cpu0 12345 67 3456 98765 123 0 45 0 0 0
-cpu1 12456 70 3460 98600 130 0 50 0 0 0
-```
-
-其中：
-
-- 第一行 `cpu` 是所有 CPU core 的總和
-- `cpu0`, `cpu1`, `cpu2` 則是每個 CPU core 的統計
-
----
-
-## `/proc/stat` CPU 欄位說明
-
-`/proc/stat` 中 CPU 欄位格式如下：
-
-```text
-cpu  user nice system idle iowait irq softirq steal guest guest_nice
-```
-
-| 欄位 | 說明 |
-|---|---|
-| `user` | 使用者程式使用 CPU 的時間 |
-| `nice` | nice priority 的使用者程式時間 |
-| `system` | kernel 使用 CPU 的時間 |
-| `idle` | CPU 閒置時間 |
-| `iowait` | CPU 等待 I/O 的時間 |
-| `irq` | 硬體中斷時間 |
-| `softirq` | 軟體中斷時間 |
-| `steal` | VM 環境中被 hypervisor 拿走的 CPU 時間 |
-| `guest` | Guest VM 使用的 CPU 時間 |
-| `guest_nice` | nice priority guest VM 使用時間 |
-
-這些數值不是百分比，而是累積的 **jiffies / clock ticks**。
-
----
-
-## CPU Usage 計算方式
-
-CPU 使用率不能只讀一次 `/proc/stat`，需要讀兩次，取時間差後計算。
-
-公式如下：
-
-```text
-total = user + nice + system + idle + iowait + irq + softirq + steal
-```
-
-```text
-idle_all = idle + iowait
-```
-
-```text
-cpu_usage = (total_delta - idle_all_delta) / total_delta * 100
-```
-
-也可以理解成：
-
-```text
-CPU 使用率 = 非 idle 時間 / 總 CPU 時間
+# Call /cpu/monitor/start again to continue monitoring.
+# A new xlsx file will be generated.
 ```
 
 ---
 
-## CPU Usage 計算範例
+## Notes
 
-### 第一次讀取
-
-```text
-cpu  100 0 50 850 0 0 0 0
-```
-
-### 隔 1 秒後第二次讀取
+* The container requires `--privileged` permission, which is already configured in `docker-compose.yml`, so it can use `nsenter` to read the host `/proc`.
+* Thread monitoring depends on `pgrep` to find the target process. Make sure the target process is running before starting monitoring.
+* When specifying a `start` or `end` time range for plotting, the time format must be:
 
 ```text
-cpu  120 0 60 920 0 0 0 0
+YYYY-MM-DD HH:MM:SS
 ```
 
----
+* For long-term monitoring, such as two days, the CPU Excel file is approximately 30–40 MB.
+* The Thread Excel file size depends on the number of threads and the configured `sample_interval`.
 
-## 1. 計算 total
-
-```text
-total1 = 100 + 0 + 50 + 850 = 1000
-total2 = 120 + 0 + 60 + 920 = 1100
-
-total_delta = 1100 - 1000 = 100
-```
-
----
-
-## 2. 計算 idle
-
-```text
-idle1 = 850
-idle2 = 920
-
-idle_delta = 920 - 850 = 70
-```
-
----
-
-## 3. 計算 CPU usage
-
-```text
-cpu_usage = (100 - 70) / 100 * 100 = 30%
-```
-
-所以這段時間內 CPU 使用率是：
-
-```text
-30%
-```
