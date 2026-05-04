@@ -5,10 +5,12 @@ services:
     container_name: cpu-service
     ports:
       - "5001:5001"
-    pid: host          # share host PID namespace so nsenter -t 1 can find host init
+    pid: host
     cap_add:
-      - SYS_PTRACE     # needed to attach to host processes
-      - SYS_ADMIN      # needed for namespace entry
+      - SYS_PTRACE
+      - SYS_ADMIN
     security_opt:
-      - apparmor:unconfined   # prevent AppArmor from blocking nsenter (Ubuntu/Debian hosts)
+      - apparmor:unconfined
+    volumes:
+      - .:/app   # 整個專案目錄 mount 進 container 的 /app
     restart: unless-stopped
