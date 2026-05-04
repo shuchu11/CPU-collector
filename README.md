@@ -1,7 +1,7 @@
 ## Table of Contents
 
-- [Project Structure](#project-structure)
-- [First-Time Startup](#first-time-startup)
+- [Structure](#structure)
+- [Startup](#startup)
 - [Function 1.0 : CPU Monitoring](#function-10--cpu-monitoring)
 - [Function 1.1 : CPU Plotting](#function-11--cpu-plotting)
 - [Function 2.0 Thread Monitoring](#function-20-thread-monitoring)
@@ -13,7 +13,7 @@
 
 ---
 
-## Project Structure
+## Structure
 
 ```text
 CPU-collector/
@@ -31,7 +31,7 @@ CPU-collector/
 
 ---
 
-## First-Time Startup
+## Startup
 
 Clone the Project
 
