@@ -78,6 +78,11 @@ sudo docker compose down
 
 BMC 主要負責「硬體層級監控」，OS 主要負責「系統運作與 CPU loading 分析」。
 
+<img width="937" height="723" alt="image" src="https://github.com/user-attachments/assets/00992742-c314-4c8c-a6b3-8f42659e1335" />
+
+---
+<img width="938" height="710" alt="image" src="https://github.com/user-attachments/assets/690c5cc3-0e19-4991-993f-b6e5a671d5a3" />
+
 ---
 
 ## 2. BMC 可以收集哪些 CPU 相關資料？
@@ -117,7 +122,7 @@ Web UI / IPMI / Redfish
 <img width="1227" height="866" alt="image" src="https://github.com/user-attachments/assets/19f188d5-0b5b-4a39-89f6-b5837b53ffb3" />
 <img width="1283" height="681" alt="image" src="https://github.com/user-attachments/assets/02ba2955-2994-4db4-8401-6b220855da6f" />
 
-# OS 如何計算 CPU Usage？
+# 4. OS 如何計算 CPU Usage？
 
 Linux 的 CPU usage 通常是從以下檔案計算：
 
